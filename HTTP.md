@@ -113,7 +113,7 @@ curl.exe --fail-with-body -H "Authorization: Bearer $env:TEXTINPAINT_API_KEY" `
   -max-upload-mb 20 -max-pixels 16000000 -max-concurrent 1 -timeout 2m
 ```
 
-可用 `-tile-size`、`-box-threshold`、`-preserve-graphics` 调整处理参数，与 CLI 含义相同；可用 `-model`、`-runtime` 指定其他部署路径。单个模型的检测仍然串行，增大 HTTP 并发数不保证加速。超时和客户端断开会在处理阶段之间检查，无法中断正在执行的单次原生推理或编码。
+可用 `-tile-size`、`-box-threshold`、`-preserve-graphics` 调整处理参数，与 CLI 含义相同。默认启用页边放大补检，`-detect-margins=false` 可关闭以减少推理次数。可用 `-model`、`-runtime` 指定其他部署路径。单个模型的检测仍然串行，增大 HTTP 并发数不保证加速。超时和客户端断开会在处理阶段之间检查，无法中断正在执行的单次原生推理或编码。
 
 POST 接口的处理错误为 JSON：
 

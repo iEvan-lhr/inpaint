@@ -1,6 +1,6 @@
 # inpaint / textinpaint
 
-独立 Go 库：自动检测图片中的文字，生成遮罩，再用 OpenCV Telea 修复背景。整个运行过程在本地 CPU 上完成，不调用云服务，也不启动 Python 子进程。
+独立 Go 库：自动检测图片中的文字，生成遮罩，再修复背景。对边界颜色一致的区域直接补色，其他区域使用 OpenCV Telea。整个运行过程在本地 CPU 上完成，不调用云服务，也不启动 Python 子进程。
 
 定位使用 **PP-OCRv4 mobile ONNX**，Go 通过 `onnxruntime_go` 调用 ONNX Runtime。图像操作通过库内的小型 cgo/C++ 桥接层调用 OpenCV 的 `core`、`imgproc`、`photo` 三个模块。没有写死样例图的文字坐标。
 
@@ -143,7 +143,7 @@ CLI 输出：
 - `detections.png`：检测框预览。
 - `regions.json`：坐标、尺寸、各阶段耗时。
 
-只定位：`-detect-only`。关闭分块检测：`-tile-size 0`。调整检测阈值：`-box-threshold 0.5`。
+只定位：`-detect-only`。关闭常规分块检测：`-tile-size 0`。关闭页边补检：`-detect-margins=false`。调整检测阈值：`-box-threshold 0.5`。
 
 ## Linux / macOS
 
@@ -155,8 +155,11 @@ Linux 示例依赖：`libopencv-dev pkg-config g++`。macOS 可用 Homebrew 安�
 
 - `Config.Detection`、`Config.Mask` 为 nil 时使用默认值。自定义时从 `DefaultDetectionOptions()`、`DefaultMaskOptions()` 开始修改。
 - 默认整图检测加重叠分块检测，合并重复区域。`LongSide` 为推理缩放上限，默认 1920；`TileScale=1.5` 可帮助检测小字。
+- `DetectMargins=true` 默认额外放大检测顶部、底部边缘，改善小页码和页脚漏检；仍使用同一个模型。可关闭以减少推理次数。
 - 默认先提取文字笔画，再扩边并修复；有纹理的区域可能退回整个文字框遮罩。
-- 图形保护是针对文档的启发式规则，可能与特殊字体冲突。可设置 `PreserveGraphics=false`；CLI 对应 `-preserve-graphics=false`。
+- 默认遮罩膨胀 2 像素，覆盖抗锯齿边缘；线条保护包含窄边缘缓冲，避免修复时把引线颜色扩散到文字区域。
+- 图形保护结合文字高度、间距、颜色与其他检测框区分线条、图标和文字。它仍是启发式规则，可能与特殊字体或混色文字冲突。可设置 `PreserveGraphics=false`；CLI 对应 `-preserve-graphics=false`。
+- 纯色补全按遮罩连通区域的外围样本判断，只改动遮罩内像素；非均匀背景回退到 Telea，复杂纹理仍可能有修复痕迹。
 - 同一个 Engine 的检测请求串行执行，`Close` 等待正在进行的检测并可重复调用。多个 Engine 共享同一 ONNX Runtime 生命周期；最后一个关闭时释放本库创建的环境。
 - 如果宿主已通过 `onnxruntime_go` 初始化环境，`RuntimePath` 留空可复用；宿主须在所有 Engine 关闭后再释放环境。
 - `context` 取消在推理分块和处理阶段之间生效，无法中断正在执行的单次原生调用。

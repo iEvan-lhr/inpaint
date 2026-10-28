@@ -38,12 +38,14 @@ func run() error {
 	tile := flag.Int("tile-size", 1280, "detail crop size; 0 disables detail crops")
 	score := flag.Float64("box-threshold", .5, "minimum text box score")
 	preserve := flag.Bool("preserve-graphics", true, "preserve document rules and geometric markers")
+	margins := flag.Bool("detect-margins", true, "enlarge page margins to find tiny headers and page numbers")
 	flag.Parse()
 	if *maxUpload < 1 || *maxUpload > 1024 {
 		return fmt.Errorf("-max-upload-mb must be in [1,1024]")
 	}
 	d, m := textinpaint.DefaultDetectionOptions(), textinpaint.DefaultMaskOptions()
 	d.TileSize, d.BoxThreshold = *tile, float32(*score)
+	d.DetectMargins = *margins
 	m.PreserveGraphics = *preserve
 	engine, err := textinpaint.New(textinpaint.Config{ModelPath: *model, RuntimePath: *runtimePath, Detection: &d, Mask: &m})
 	if err != nil {

@@ -30,8 +30,8 @@ type Region struct {
 }
 
 // DetectionOptions configure the PP-OCRv4 DB text detector. TileSize=0 disables
-// the detail passes; TileScale helps with small text. Scores are model scores,
-// not a guarantee that a region contains text.
+// regular detail tiles; DetectMargins independently enables enlarged top/bottom
+// margin passes. Scores are model scores, not a guarantee of text.
 type DetectionOptions struct {
 	LongSide       int
 	TileSize       int
@@ -41,14 +41,16 @@ type DetectionOptions struct {
 	UnclipRatio    float32
 	MaxCandidates  int
 	Threads        int
+	DetectMargins  bool
 }
 
 func DefaultDetectionOptions() DetectionOptions {
-	return DetectionOptions{LongSide: 1920, TileSize: 1280, TileScale: 1.5, PixelThreshold: .3, BoxThreshold: .5, UnclipRatio: 1.6, MaxCandidates: 1000, Threads: 4}
+	return DetectionOptions{LongSide: 1920, TileSize: 1280, TileScale: 1.5, PixelThreshold: .3, BoxThreshold: .5, UnclipRatio: 1.6, MaxCandidates: 1000, Threads: 4, DetectMargins: true}
 }
 
-// MaskOptions control glyph extraction. PreserveGraphics uses document-oriented
-// heuristics for rules and colored markers; turn it off for decorative lettering.
+// MaskOptions control glyph extraction. PreserveGraphics uses contextual
+// heuristics for rules, colored markers and leading icons; turn it off for
+// decorative lettering that resembles graphics.
 type MaskOptions struct {
 	Padding           float64
 	ContrastThreshold int
@@ -57,7 +59,7 @@ type MaskOptions struct {
 }
 
 func DefaultMaskOptions() MaskOptions {
-	return MaskOptions{Padding: 2, ContrastThreshold: 13, Dilation: 1, PreserveGraphics: true}
+	return MaskOptions{Padding: 2, ContrastThreshold: 13, Dilation: 2, PreserveGraphics: true}
 }
 
 // Config selects local model/runtime files. Nil option pointers select defaults.
@@ -152,7 +154,8 @@ func BuildMask(src image.Image, regions []Region, options MaskOptions) (*image.G
 	return cv.Mask(im, polygons, options.Padding, options.ContrastThreshold, options.Dilation, options.PreserveGraphics)
 }
 
-// Inpaint removes nonzero mask pixels using OpenCV's Telea algorithm.
+// Inpaint removes nonzero mask pixels using local background color when a
+// component's boundary is uniform, and OpenCV Telea for other backgrounds.
 // The mask must have the same dimensions as src. Transparent inputs are flattened
 // onto white. The returned image has zero-based bounds and does not alias src.
 func Inpaint(src image.Image, mask *image.Gray, radius float64) (*image.RGBA, error) {

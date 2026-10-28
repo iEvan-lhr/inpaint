@@ -31,6 +31,7 @@ func run() error {
 	score := flag.Float64("box-threshold", .5, "minimum text box score")
 	detectOnly := flag.Bool("detect-only", false, "only output polygons and their preview")
 	preserve := flag.Bool("preserve-graphics", true, "preserve document rules and geometric markers")
+	margins := flag.Bool("detect-margins", true, "enlarge page margins to find tiny headers and page numbers")
 	flag.Parse()
 	if *input == "" {
 		return fmt.Errorf("-input is required")
@@ -60,6 +61,7 @@ func run() error {
 	d, m := textinpaint.DefaultDetectionOptions(), textinpaint.DefaultMaskOptions()
 	d.TileSize = *tile
 	d.BoxThreshold = float32(*score)
+	d.DetectMargins = *margins
 	m.PreserveGraphics = *preserve
 	engine, err := textinpaint.New(textinpaint.Config{ModelPath: *model, RuntimePath: *runtime, Detection: &d, Mask: &m})
 	if err != nil {

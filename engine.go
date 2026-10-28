@@ -209,6 +209,19 @@ func (e *Engine) Detect(ctx context.Context, src image.Image) ([]Region, error) 
 			}
 		}
 	}
+	// Page numbers and tiny footers can disappear in a full-page resize.
+	// Use narrow, enlarged margin crops with the same model and thresholds.
+	if d.DetectMargins && im.Rect.Dy() >= 256 {
+		width := min(640, im.Rect.Dx())
+		height := min(256, max(64, im.Rect.Dy()/10))
+		for _, top := range []int{0, im.Rect.Dy() - height} {
+			for _, left := range tileStarts(im.Rect.Dx(), width) {
+				if err = addPass(image.Rect(left, top, left+width, top+height), 2); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	return deduplicate(regions), nil
 }
 
