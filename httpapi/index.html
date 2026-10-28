@@ -22,6 +22,8 @@
     button, .download { font: inherit; font-size: 14px; border: 0; border-radius: 8px; padding: 12px 23px; background: #206a53; color: white; cursor: pointer; text-decoration: none; white-space: nowrap; }
     button:hover, .download:hover { background: #185740; }
     button:disabled { opacity: .45; cursor: default; }
+    button.secondary { background: #edf4ef; color: #206a53; border: 1px solid #ccded3; }
+    button.secondary:hover { background: #e0ede5; }
     details { margin-top: 18px; color: #66716d; font-size: 13px; }
     summary { cursor: pointer; width: fit-content; }
     details label { margin: 14px 0 7px; font-size: 13px; }
@@ -33,6 +35,14 @@
     .panel-head { padding: 17px 20px; border-bottom: 1px solid #e8edea; display: flex; align-items: center; justify-content: space-between; min-height: 66px; }
     h2 { margin: 0; font-size: 15px; font-weight: 600; }
     .download { padding: 8px 13px; font-size: 12px; }
+    .json-panel { margin-bottom: 24px; scroll-margin-top: 20px; }
+    .json-panel .panel-head { flex-wrap: wrap; gap: 12px; }
+    .json-actions { display: flex; gap: 10px; align-items: center; }
+    .json-actions button { padding: 8px 13px; font-size: 12px; }
+    .json-info { padding: 14px 20px 0; font-size: 13px; }
+    .json-info p { margin-top: 4px; font-size: 12px; }
+    #json-output { display: block; width: calc(100% - 40px); height: 320px; min-height: 160px; margin: 14px 20px; padding: 14px; resize: vertical; border: 1px solid #dfe6e2; border-radius: 8px; background: #f8faf9; color: #233e31; font: 13px/1.6 Consolas, "SFMono-Regular", monospace; tab-size: 2; }
+    #json-notice { padding: 0 20px 16px; font-size: 13px; color: #537164; }
     .canvas { min-height: 360px; padding: 18px; display: flex; align-items: center; justify-content: center; background: #fcfdfc; }
     .canvas img { max-width: 100%; max-height: 650px; object-fit: contain; }
     .empty { color: #929c97; font-size: 14px; }
@@ -52,10 +62,20 @@
     <div class="controls">
       <div class="upload"><label for="file">选择图片</label><input id="file" name="image" type="file" accept="image/png,image/jpeg" required></div>
       <button id="submit" type="submit" disabled>开始去字</button>
+      <button id="detect" class="secondary" type="button" disabled>获取位置 JSON</button>
     </div>
     <details><summary>访问密钥（仅服务启用鉴权时填写）</summary><label for="key">API Key</label><input id="key" type="password" autocomplete="off" placeholder="输入服务管理员提供的密钥"></details>
     <div id="status" role="status" aria-live="polite">选择图片后即可开始。</div>
   </form>
+  <section id="json-panel" class="panel json-panel" aria-labelledby="json-title" hidden>
+    <div class="panel-head">
+      <h2 id="json-title">检测位置 JSON</h2>
+      <div class="json-actions"><button id="copy-json" class="secondary" type="button">复制 JSON</button><a id="download-json" class="download" download="regions.json">下载 JSON</a></div>
+    </div>
+    <div class="json-info"><strong id="json-summary"></strong><p>polygon 是区域四个顶点的坐标，以原图左上角为原点，单位为像素；score 是检测置信度。</p></div>
+    <textarea id="json-output" aria-label="检测位置 JSON 内容" readonly spellcheck="false" wrap="off"></textarea>
+    <div id="json-notice" role="status" aria-live="polite">可直接选择内容，或点击复制、下载。</div>
+  </section>
   <div class="previews">
     <section class="panel"><div class="panel-head"><h2>原图</h2></div><div class="canvas"><span id="original-empty" class="empty">原图将在这里显示</span><img id="original" alt="上传的原图" hidden></div></section>
     <section class="panel"><div class="panel-head"><h2>去字结果</h2><a id="download" class="download" download="no_text.png" hidden>下载 PNG</a></div><div class="canvas"><span id="result-empty" class="empty">处理完成后可预览和下载</span><img id="result" alt="去除文字后的图片" hidden></div></section>
@@ -66,11 +86,17 @@
   const form = document.getElementById('form');
   const file = document.getElementById('file');
   const submit = document.getElementById('submit');
+  const detect = document.getElementById('detect');
   const status = document.getElementById('status');
   const original = document.getElementById('original');
   const result = document.getElementById('result');
   const download = document.getElementById('download');
-  let originalURL = '', resultURL = '';
+  const jsonPanel = document.getElementById('json-panel');
+  const jsonOutput = document.getElementById('json-output');
+  const jsonDownload = document.getElementById('download-json');
+  const jsonNotice = document.getElementById('json-notice');
+  const copyJSON = document.getElementById('copy-json');
+  let originalURL = '', resultURL = '', jsonURL = '', jsonText = '', busy = false;
   function message(text, error = false) { status.textContent = text; status.classList.toggle('error', error); }
   function resetResult() {
     result.hidden = true; result.removeAttribute('src'); download.hidden = true; download.removeAttribute('href');
@@ -78,28 +104,54 @@
     if (resultURL) URL.revokeObjectURL(resultURL);
     resultURL = '';
   }
+  function resetJSON() {
+    jsonPanel.hidden = true; jsonOutput.value = ''; jsonText = '';
+    jsonDownload.removeAttribute('href');
+    if (jsonURL) URL.revokeObjectURL(jsonURL);
+    jsonURL = '';
+    jsonNotice.textContent = '可直接选择内容，或点击复制、下载。';
+  }
+  function showJSON(data) {
+    jsonText = JSON.stringify(data, null, 2) + '\n';
+    jsonOutput.value = jsonText;
+    document.getElementById('json-summary').textContent = data.width + ' × ' + data.height + ' 像素 · ' + data.regions.length + ' 个文字区域';
+    if (jsonURL) URL.revokeObjectURL(jsonURL);
+    jsonURL = URL.createObjectURL(new Blob([jsonText], { type: 'application/json;charset=utf-8' }));
+    jsonDownload.href = jsonURL; jsonPanel.hidden = false;
+    jsonPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function setBusy(value, mode) {
+    busy = value; file.disabled = value;
+    submit.disabled = value || !file.files[0]; detect.disabled = value || !file.files[0];
+    submit.textContent = value && mode === 'remove' ? '正在处理…' : '开始去字';
+    detect.textContent = value && mode === 'detect' ? '正在检测…' : '获取位置 JSON';
+  }
+  async function upload(endpoint) {
+    const body = new FormData(); body.append('image', file.files[0]);
+    const key = document.getElementById('key').value.trim();
+    const response = await fetch(endpoint, { method: 'POST', body, headers: key ? { Authorization: 'Bearer ' + key } : {} });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error?.message || '请求失败（HTTP ' + response.status + '）');
+    }
+    return response;
+  }
   file.addEventListener('change', () => {
     if (originalURL) URL.revokeObjectURL(originalURL);
-    originalURL = ''; resetResult();
+    originalURL = ''; resetResult(); resetJSON();
     const selected = file.files[0];
-    submit.disabled = !selected; original.hidden = !selected;
+    submit.disabled = !selected; detect.disabled = !selected; original.hidden = !selected;
     document.getElementById('original-empty').hidden = !!selected;
-    if (selected) { originalURL = URL.createObjectURL(selected); original.src = originalURL; message('图片已就绪，点击「开始去字」。'); }
+    if (selected) { originalURL = URL.createObjectURL(selected); original.src = originalURL; message('图片已就绪，可开始去字或获取位置 JSON。'); }
     else { original.removeAttribute('src'); message('选择图片后即可开始。'); }
   });
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (!file.files[0] || submit.disabled) return;
-    submit.disabled = true; file.disabled = true; submit.textContent = '正在处理…'; resetResult();
+    if (!file.files[0] || busy) return;
+    setBusy(true, 'remove'); resetResult();
     message('正在定位文字并修复背景，请稍候。');
     try {
-      const body = new FormData(); body.append('image', file.files[0]);
-      const key = document.getElementById('key').value.trim();
-      const response = await fetch('/v1/remove', { method: 'POST', body, headers: key ? { Authorization: 'Bearer ' + key } : {} });
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(data?.error?.message || '请求失败（HTTP ' + response.status + '）');
-      }
+      const response = await upload('/v1/remove');
       resultURL = URL.createObjectURL(await response.blob()); result.src = resultURL; result.hidden = false;
       document.getElementById('result-empty').hidden = true;
       download.href = resultURL; download.hidden = false;
@@ -107,7 +159,40 @@
       const seconds = (Number(response.headers.get('X-Processing-Ms')) / 1000).toFixed(1);
       message('处理完成 · 检测到 ' + count + ' 个文字区域 · 服务处理耗时 ' + seconds + ' 秒');
     } catch (error) { message(error.message || '连接失败，请检查服务是否运行。', true); }
-    finally { submit.disabled = false; file.disabled = false; submit.textContent = '开始去字'; }
+    finally { setBusy(false); }
+  });
+  detect.addEventListener('click', async () => {
+    if (!file.files[0] || busy) return;
+    if (jsonText) {
+      jsonPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      message('已显示当前图片的位置 JSON，可直接复制或下载。');
+      return;
+    }
+    setBusy(true, 'detect');
+    message('正在定位文字并获取 JSON，请稍候。');
+    try {
+      const response = await upload('/v1/detect');
+      const data = await response.json();
+      showJSON(data);
+      const seconds = (Number(response.headers.get('X-Processing-Ms')) / 1000).toFixed(1);
+      message('检测完成 · ' + data.regions.length + ' 个文字区域 · 服务处理耗时 ' + seconds + ' 秒');
+    } catch (error) { message(error.message || '连接失败，请检查服务是否运行。', true); }
+    finally { setBusy(false); }
+  });
+  copyJSON.addEventListener('click', async () => {
+    if (!jsonText) return;
+    // Clipboard API needs a secure origin; LAN HTTP uses selection/copy.
+    let copied = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(jsonText); copied = true;
+      }
+    } catch (_) {}
+    if (!copied) {
+      jsonOutput.focus({ preventScroll: true }); jsonOutput.select();
+      try { copied = document.execCommand('copy'); } catch (_) {}
+    }
+    jsonNotice.textContent = copied ? 'JSON 已复制。' : '浏览器未允许自动复制，内容已全选，请使用键盘复制，或点击「下载 JSON」。';
   });
 </script>
 </body>
