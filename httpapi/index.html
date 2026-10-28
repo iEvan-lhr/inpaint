@@ -28,6 +28,9 @@
     summary { cursor: pointer; width: fit-content; }
     details label { margin: 14px 0 7px; font-size: 13px; }
     input[type=password] { width: min(100%, 380px); border: 1px solid #d4ded8; padding: 10px; border-radius: 6px; }
+    .filter { margin-top: 20px; }
+    .filter input { width: 85px; border: 1px solid #d4ded8; padding: 8px; border-radius: 6px; font: inherit; }
+    .filter p { margin-top: 8px; font-size: 13px; }
     #status { margin-top: 18px; font-size: 14px; min-height: 22px; color: #537164; }
     #status.error { color: #aa382d; }
     .previews { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
@@ -64,6 +67,7 @@
       <button id="submit" type="submit" disabled>开始去字</button>
       <button id="detect" class="secondary" type="button" disabled>获取位置 JSON</button>
     </div>
+    <div class="filter"><label for="min-text-height">忽略过小文字 · 最小文字高度（像素）</label><input id="min-text-height" type="number" min="0" max="256" step="1" value="12" required><p>按原图中的文字笔画估算。默认保留不足 12 像素的小字；调大可保留更多小字，设为 0 则关闭过滤。以小字为主、带完整边框的界面示意图会整体保留，保护内部按钮和图案。</p></div>
     <details><summary>访问密钥（仅服务启用鉴权时填写）</summary><label for="key">API Key</label><input id="key" type="password" autocomplete="off" placeholder="输入服务管理员提供的密钥"></details>
     <div id="status" role="status" aria-live="polite">选择图片后即可开始。</div>
   </form>
@@ -72,7 +76,7 @@
       <h2 id="json-title">检测位置 JSON</h2>
       <div class="json-actions"><button id="copy-json" class="secondary" type="button">复制 JSON</button><a id="download-json" class="download" download="regions.json">下载 JSON</a></div>
     </div>
-    <div class="json-info"><strong id="json-summary"></strong><p>polygon 是区域四个顶点的坐标，以原图左上角为原点，单位为像素；score 是检测置信度。</p></div>
+    <div class="json-info"><strong id="json-summary"></strong><p>JSON 仅包含达到最小文字高度的区域。polygon 是原图坐标；score 是检测置信度；text_height 是估算的文字高度（像素）。</p></div>
     <textarea id="json-output" aria-label="检测位置 JSON 内容" readonly spellcheck="false" wrap="off"></textarea>
     <div id="json-notice" role="status" aria-live="polite">可直接选择内容，或点击复制、下载。</div>
   </section>
@@ -80,11 +84,12 @@
     <section class="panel"><div class="panel-head"><h2>原图</h2></div><div class="canvas"><span id="original-empty" class="empty">原图将在这里显示</span><img id="original" alt="上传的原图" hidden></div></section>
     <section class="panel"><div class="panel-head"><h2>去字结果</h2><a id="download" class="download" download="no_text.png" hidden>下载 PNG</a></div><div class="canvas"><span id="result-empty" class="empty">处理完成后可预览和下载</span><img id="result" alt="去除文字后的图片" hidden></div></section>
   </div>
-  <footer>图片发送到当前服务进行处理。细小文字可能漏检，复杂背景可能留下修复痕迹，请检查结果。</footer>
+  <footer>图片发送到当前服务进行处理。文字高度与界面保护均为自动判断；复杂背景可能留下修复痕迹，请检查结果。</footer>
 </main>
 <script>
   const form = document.getElementById('form');
   const file = document.getElementById('file');
+  const minimum = document.getElementById('min-text-height');
   const submit = document.getElementById('submit');
   const detect = document.getElementById('detect');
   const status = document.getElementById('status');
@@ -121,7 +126,7 @@
     jsonPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   function setBusy(value, mode) {
-    busy = value; file.disabled = value;
+    busy = value; file.disabled = value; minimum.disabled = value;
     submit.disabled = value || !file.files[0]; detect.disabled = value || !file.files[0];
     submit.textContent = value && mode === 'remove' ? '正在处理…' : '开始去字';
     detect.textContent = value && mode === 'detect' ? '正在检测…' : '获取位置 JSON';
@@ -129,7 +134,7 @@
   async function upload(endpoint) {
     const body = new FormData(); body.append('image', file.files[0]);
     const key = document.getElementById('key').value.trim();
-    const response = await fetch(endpoint, { method: 'POST', body, headers: key ? { Authorization: 'Bearer ' + key } : {} });
+    const response = await fetch(endpoint + '?min_text_height=' + encodeURIComponent(minimum.value), { method: 'POST', body, headers: key ? { Authorization: 'Bearer ' + key } : {} });
     if (!response.ok) {
       const data = await response.json().catch(() => null);
       throw new Error(data?.error?.message || '请求失败（HTTP ' + response.status + '）');
@@ -144,6 +149,10 @@
     document.getElementById('original-empty').hidden = !!selected;
     if (selected) { originalURL = URL.createObjectURL(selected); original.src = originalURL; message('图片已就绪，可开始去字或获取位置 JSON。'); }
     else { original.removeAttribute('src'); message('选择图片后即可开始。'); }
+  });
+  minimum.addEventListener('input', () => {
+    resetResult(); resetJSON();
+    message('文字高度设置已更新，请重新去字或获取 JSON。');
   });
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -163,6 +172,7 @@
   });
   detect.addEventListener('click', async () => {
     if (!file.files[0] || busy) return;
+    if (!minimum.reportValidity()) return;
     if (jsonText) {
       jsonPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       message('已显示当前图片的位置 JSON，可直接复制或下载。');

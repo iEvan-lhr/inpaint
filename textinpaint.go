@@ -25,8 +25,21 @@ type Point struct {
 }
 type Quad [4]Point
 type Region struct {
-	Polygon Quad    `json:"polygon"`
-	Score   float32 `json:"score"`
+	Polygon    Quad    `json:"polygon"`
+	Score      float32 `json:"score"`
+	TextHeight float32 `json:"text_height"`
+}
+
+// ProcessingOptions apply to one request. MinTextHeight is the estimated glyph
+// height in original-image pixels, not the expanded detector box height.
+// Zero disables small-text filtering.
+type ProcessingOptions struct{ MinTextHeight float64 }
+
+func validProcessingOptions(o ProcessingOptions) error {
+	if math.IsNaN(o.MinTextHeight) || math.IsInf(o.MinTextHeight, 0) || o.MinTextHeight < 0 || o.MinTextHeight > 256 {
+		return errors.New("textinpaint: minimum text height must be finite and in [0,256]")
+	}
+	return nil
 }
 
 // DetectionOptions configure the PP-OCRv4 DB text detector. TileSize=0 disables
@@ -42,10 +55,11 @@ type DetectionOptions struct {
 	MaxCandidates  int
 	Threads        int
 	DetectMargins  bool
+	MinTextHeight  float64
 }
 
 func DefaultDetectionOptions() DetectionOptions {
-	return DetectionOptions{LongSide: 1920, TileSize: 1280, TileScale: 1.5, PixelThreshold: .3, BoxThreshold: .5, UnclipRatio: 1.6, MaxCandidates: 1000, Threads: 4, DetectMargins: true}
+	return DetectionOptions{LongSide: 1920, TileSize: 1280, TileScale: 1.5, PixelThreshold: .3, BoxThreshold: .5, UnclipRatio: 1.6, MaxCandidates: 1000, Threads: 4, DetectMargins: true, MinTextHeight: 12}
 }
 
 // MaskOptions control glyph extraction. PreserveGraphics uses contextual
@@ -154,8 +168,9 @@ func BuildMask(src image.Image, regions []Region, options MaskOptions) (*image.G
 	return cv.Mask(im, polygons, options.Padding, options.ContrastThreshold, options.Dilation, options.PreserveGraphics)
 }
 
-// Inpaint removes nonzero mask pixels using local background color when a
-// component's boundary is uniform, and OpenCV Telea for other backgrounds.
+// Inpaint removes nonzero mask pixels using local background color for uniform
+// boundaries, a robust color-plane fit for smooth boundaries, and OpenCV Telea
+// for other backgrounds.
 // The mask must have the same dimensions as src. Transparent inputs are flattened
 // onto white. The returned image has zero-based bounds and does not alias src.
 func Inpaint(src image.Image, mask *image.Gray, radius float64) (*image.RGBA, error) {

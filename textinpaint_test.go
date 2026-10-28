@@ -277,6 +277,138 @@ func TestQuadDeduplicationAndValidation(t *testing.T) {
 		t.Fatal("nil input accepted")
 	}
 }
+
+func TestSmallTextFilterUsesGlyphsNotExpandedBox(t *testing.T) {
+	im := whiteImage(image.Rect(0, 0, 240, 110))
+	for _, x := range []int{30, 42, 54, 66} {
+		draw.Draw(im, image.Rect(x, 29, x+5, 36), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	}
+	for _, x := range []int{130, 150, 170, 190} {
+		draw.Draw(im, image.Rect(x, 24, x+9, 44), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	}
+	// Both detector boxes are 32 px tall; actual glyphs are 7 and 20 px.
+	regions := []Region{{Polygon: rectangle(22, 18, 80, 50)}, {Polygon: rectangle(122, 18, 208, 50)}}
+	kept, err := filterSmallText(im, regions, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 || kept[0].Polygon != regions[1].Polygon || kept[0].TextHeight != 20 {
+		t.Fatalf("wrong retained text: %+v", kept)
+	}
+	all, err := filterSmallText(im, regions, 0)
+	if err != nil || len(all) != 2 || all[0].TextHeight != 7 {
+		t.Fatalf("zero should disable filtering: %+v, %v", all, err)
+	}
+	mask, err := BuildMask(im, kept, DefaultMaskOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Inpaint(im, mask, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RGBAAt(32, 32) != im.RGBAAt(32, 32) || out.RGBAAt(133, 32) != (color.RGBA{255, 255, 255, 255}) {
+		t.Fatal("small text must stay while readable text is removed")
+	}
+	for _, value := range []float64{-1, math.NaN(), math.Inf(1), 257} {
+		if validProcessingOptions(ProcessingOptions{MinTextHeight: value}) == nil {
+			t.Fatalf("accepted threshold %v", value)
+		}
+	}
+}
+
+func TestVerticalTextFilterUsesCharacterWidth(t *testing.T) {
+	im := whiteImage(image.Rect(0, 0, 100, 180))
+	for _, y := range []int{25, 42, 59, 76} {
+		draw.Draw(im, image.Rect(30, y, 37, y+8), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	}
+	regions := []Region{{Polygon: rectangle(20, 18, 48, 96)}}
+	kept, err := filterSmallText(im, regions, 12)
+	if err != nil || len(kept) != 0 {
+		t.Fatalf("vertical line length must not turn tiny characters into large text: %+v, %v", kept, err)
+	}
+}
+
+func TestTinyTextInsetPreservesButtonArtwork(t *testing.T) {
+	im := whiteImage(image.Rect(0, 0, 600, 300))
+	draw.Draw(im, image.Rect(20, 30, 230, 210), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	draw.Draw(im, image.Rect(27, 37, 223, 203), image.NewUniform(color.RGBA{245, 250, 210, 255}), image.Point{}, draw.Src)
+	draw.Draw(im, image.Rect(120, 105, 160, 145), image.NewUniform(color.RGBA{100, 180, 20, 255}), image.Point{}, draw.Src)
+	regions := []Region{
+		{Polygon: rectangle(40, 55, 90, 70), TextHeight: 7},
+		{Polygon: rectangle(40, 80, 90, 95), TextHeight: 8},
+		{Polygon: rectangle(118, 102, 163, 148), TextHeight: 30}, // false text detection on a button icon
+		{Polygon: rectangle(300, 60, 500, 90), TextHeight: 20},
+	}
+	kept, ignored, err := selectDetectedText(im, regions, 12, true)
+	if err != nil || len(kept) != 1 || kept[0].Polygon != regions[3].Polygon {
+		t.Fatalf("framed UI must stay intact: %+v, %v", kept, err)
+	}
+	mask := image.NewGray(im.Rect)
+	draw.Draw(mask, image.Rect(15, 25, 235, 215), image.NewUniform(color.White), image.Point{}, draw.Src)
+	protectRegions(mask, ignored)
+	if mask.GrayAt(140, 125).Y != 0 || mask.GrayAt(22, 80).Y != 0 || mask.GrayAt(16, 26).Y == 0 {
+		t.Fatal("panel protection must include artwork and frame, within its bounds")
+	}
+	for _, tc := range []struct {
+		minimum float64
+		protect bool
+		want    int
+	}{{0, true, 4}, {12, false, 2}} {
+		selected, _, err := selectDetectedText(im, regions, tc.minimum, tc.protect)
+		if err != nil || len(selected) != tc.want {
+			t.Fatalf("option override: %+v, %v", selected, err)
+		}
+	}
+	regions[0].TextHeight = 20
+	regions[1].TextHeight = 20
+	selected, _, err := selectDetectedText(im, regions, 12, true)
+	if err != nil || len(selected) != 4 {
+		t.Fatal("a framed region dominated by readable text must not be treated as a tiny interface")
+	}
+}
+
+func TestColoredBackgroundHolesAreNotMarkers(t *testing.T) {
+	im := image.NewRGBA(image.Rect(0, 0, 160, 100))
+	bg := color.RGBA{177, 210, 60, 255}
+	draw.Draw(im, im.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
+	// A triangular background hole enclosed by the strokes of a numeral.
+	for y := 0; y < 24; y++ {
+		for x := 0; x < 4; x++ {
+			im.SetRGBA(54-y/2+x, 25+y, color.RGBA{30, 30, 30, 255})
+		}
+	}
+	draw.Draw(im, image.Rect(52, 25, 56, 60), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	draw.Draw(im, image.Rect(42, 46, 63, 50), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	mask, err := BuildMask(im, []Region{{Polygon: rectangle(36, 18, 70, 66)}}, DefaultMaskOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mask.GrayAt(54, 40).Y == 0 || mask.GrayAt(46, 48).Y == 0 {
+		t.Fatal("a colored background hole protected numeral strokes")
+	}
+}
+
+func TestGradientDoesNotReverseTextPolarity(t *testing.T) {
+	im := image.NewRGBA(image.Rect(0, 0, 220, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 220; x++ {
+			im.SetRGBA(x, y, color.RGBA{uint8(210 + x/8), uint8(220 + y/8), 250, 255})
+		}
+	}
+	for _, x := range []int{30, 50, 70, 90, 110, 130, 150} {
+		draw.Draw(im, image.Rect(x, 25, x+9, 46), image.NewUniform(color.RGBA{10, 20, 60, 255}), image.Point{}, draw.Src)
+	}
+	mask, err := BuildMask(im, []Region{{Polygon: rectangle(24, 19, 166, 52)}}, DefaultMaskOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range []int{34, 54, 74, 94, 114, 134, 154} {
+		if mask.GrayAt(x, 35).Y == 0 {
+			t.Fatalf("dark glyph missed on gradient at %d", x)
+		}
+	}
+}
 func TestTileCoverage(t *testing.T) {
 	for _, length := range []int{64, 1280, 1281, 2529, 10000} {
 		starts := tileStarts(length, 1280)

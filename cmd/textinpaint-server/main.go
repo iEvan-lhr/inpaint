@@ -39,6 +39,7 @@ func run() error {
 	score := flag.Float64("box-threshold", .5, "minimum text box score")
 	preserve := flag.Bool("preserve-graphics", true, "preserve document rules and geometric markers")
 	margins := flag.Bool("detect-margins", true, "enlarge page margins to find tiny headers and page numbers")
+	minimum := flag.Float64("min-text-height", textinpaint.DefaultDetectionOptions().MinTextHeight, "minimum estimated glyph height in original pixels; 0 includes tiny text")
 	flag.Parse()
 	if *maxUpload < 1 || *maxUpload > 1024 {
 		return fmt.Errorf("-max-upload-mb must be in [1,1024]")
@@ -46,6 +47,7 @@ func run() error {
 	d, m := textinpaint.DefaultDetectionOptions(), textinpaint.DefaultMaskOptions()
 	d.TileSize, d.BoxThreshold = *tile, float32(*score)
 	d.DetectMargins = *margins
+	d.MinTextHeight = *minimum
 	m.PreserveGraphics = *preserve
 	engine, err := textinpaint.New(textinpaint.Config{ModelPath: *model, RuntimePath: *runtimePath, Detection: &d, Mask: &m})
 	if err != nil {

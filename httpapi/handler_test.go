@@ -29,6 +29,52 @@ type processor struct {
 	calls  int
 }
 
+type optionsProcessor struct {
+	processor
+	thresholds []float64
+}
+
+func (p *optionsProcessor) DetectWithOptions(ctx context.Context, src image.Image, options textinpaint.ProcessingOptions) ([]textinpaint.Region, error) {
+	p.thresholds = append(p.thresholds, options.MinTextHeight)
+	return p.Detect(ctx, src)
+}
+func (p *optionsProcessor) RemoveWithOptions(ctx context.Context, src image.Image, options textinpaint.ProcessingOptions) (*textinpaint.Result, error) {
+	p.thresholds = append(p.thresholds, options.MinTextHeight)
+	return p.Remove(ctx, src)
+}
+
+func TestPerRequestMinimumTextHeight(t *testing.T) {
+	p := &optionsProcessor{}
+	h, err := httpapi.New(p, httpapi.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := imageBytes(t, "png", 20, 20)
+	for _, path := range []string{"/v1/detect?min_text_height=18", "/v1/remove?min_text_height=0", "/v1/remove?format=zip&min_text_height=12"} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, upload(t, path, data))
+		if rr.Code != 200 {
+			t.Fatalf("%s: %d %s", path, rr.Code, rr.Body.String())
+		}
+	}
+	if len(p.thresholds) != 3 || p.thresholds[0] != 18 || p.thresholds[1] != 0 || p.thresholds[2] != 12 {
+		t.Fatalf("options not forwarded: %v", p.thresholds)
+	}
+	for _, value := range []string{"", "-1", "257", "NaN", "Inf", "abc", "12&min_text_height=16"} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, upload(t, "/v1/detect?min_text_height="+value, data))
+		checkError(t, rr, 400, "invalid_min_text_height")
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, upload(t, "/v1/detect", data))
+	if rr.Code != 200 || len(p.thresholds) != 3 {
+		t.Fatal("per-request options leaked into the next request")
+	}
+	rr = httptest.NewRecorder()
+	handler(t, &processor{}, httpapi.Options{}).ServeHTTP(rr, upload(t, "/v1/detect?min_text_height=12", data))
+	checkError(t, rr, 400, "unsupported_options")
+}
+
 func (p *processor) Detect(ctx context.Context, src image.Image) ([]textinpaint.Region, error) {
 	p.calls++
 	return []textinpaint.Region{{Polygon: textinpaint.Quad{{X: 2, Y: 2}, {X: 8, Y: 2}, {X: 8, Y: 8}, {X: 2, Y: 8}}, Score: .9}}, nil

@@ -41,6 +41,49 @@ int colorDistance(cv::Vec3b a, cv::Vec3b b) {
     return std::max({std::abs(int(a[0])-b[0]),std::abs(int(a[1])-b[1]),std::abs(int(a[2])-b[2])});
 }
 
+// Fit a local color plane to the visible boundary. Robust fitting excludes a
+// few antialiased remnants or a nearby rule, but rejects textured boundaries.
+// Only masked pixels are written; photographs still fall back to Telea.
+bool fillSmoothBackground(const cv::Mat& source, const cv::Mat& component,
+    const cv::Mat& ring, cv::Mat destination) {
+    std::vector<cv::Vec3d> positions, colors;
+    for (int y=0; y<ring.rows; ++y) for (int x=0; x<ring.cols; ++x) {
+        if (!ring.at<unsigned char>(y,x)) continue;
+        positions.emplace_back(1.,double(x)/std::max(1,ring.cols-1),double(y)/std::max(1,ring.rows-1));
+        auto c=source.at<cv::Vec3b>(y,x); colors.emplace_back(c[0],c[1],c[2]);
+    }
+    if (positions.size()<24) return false;
+    std::vector<double> residuals(positions.size(),0.);
+    cv::Matx33d coefficients;
+    double cutoff=256.;
+    for (int iteration=0; iteration<4; ++iteration) {
+        cv::Matx33d normal=cv::Matx33d::zeros(), values=cv::Matx33d::zeros();
+        for (size_t i=0; i<positions.size(); ++i) {
+            if (residuals[i]>cutoff) continue;
+            auto p=positions[i], c=colors[i];
+            normal+=p*p.t(); values+=p*c.t();
+        }
+        if (!cv::solve(normal,values,coefficients,cv::DECOMP_SVD)) return false;
+        for (size_t i=0; i<positions.size(); ++i) {
+            auto difference=coefficients.t()*positions[i]-colors[i];
+            residuals[i]=std::max({std::abs(difference[0]),std::abs(difference[1]),std::abs(difference[2])});
+        }
+        auto ordered=residuals;
+        std::nth_element(ordered.begin(),ordered.begin()+ordered.size()/2,ordered.end());
+        cutoff=std::max(3.,ordered[ordered.size()/2]*2.5);
+    }
+    size_t consistent=0;
+    for (auto residual:residuals) if (residual<=4.) ++consistent;
+    if (double(consistent)/positions.size()<.85) return false;
+    for (int y=0; y<component.rows; ++y) for (int x=0; x<component.cols; ++x) {
+        if (!component.at<unsigned char>(y,x)) continue;
+        auto prediction=coefficients.t()*cv::Vec3d(1.,double(x)/std::max(1,ring.cols-1),double(y)/std::max(1,ring.rows-1));
+        destination.at<cv::Vec3b>(y,x)=cv::Vec3b(cv::saturate_cast<unsigned char>(prediction[0]),
+            cv::saturate_cast<unsigned char>(prediction[1]),cv::saturate_cast<unsigned char>(prediction[2]));
+    }
+    return true;
+}
+
 // Learn compact leading icons from their spacing and their color relative to
 // the following text. The wider context also covers icons clipped by OCR boxes.
 // Apply all protections after collecting all regions, independent of box order.
@@ -52,7 +95,8 @@ void protectLeadingIcons(const cv::Mat& bgr, const float* polygons, int count, c
         if (height<12 || text.width<height*2.2 || text.height>height*1.4) continue;
         cv::Mat entire(text.size(),CV_8U,cv::Scalar(255));
         auto bg=dominantColor(bgr(text),entire);
-        cv::Rect area(text.x-cvRound(2*height),text.y-2,text.width+cvRound(2*height)+2,text.height+4);
+        cv::Rect area(text.x-cvRound(4.5*height),text.y-cvRound(height*1.5),
+            text.width+cvRound(4.5*height)+2,text.height+cvRound(height*3));
         area &= cv::Rect(0,0,bgr.cols,bgr.rows);
         cv::Mat patch=bgr(area), ink=cv::Mat::zeros(area.size(),CV_8U);
         std::vector<cv::Point> runs;
@@ -71,15 +115,21 @@ void protectLeadingIcons(const cv::Mat& bgr, const float* polygons, int count, c
         for (size_t k=0; k+1<runs.size(); ++k) {
             auto run=runs[k];
             int width=run.y-run.x+1, gap=runs[k+1].x-run.y-1;
-            if (run.x+area.x>text.x+height || width<height*.25 || width>height*1.5 || gap<height*.28) continue;
+            if (run.x+area.x>text.x+height || width<height*.25 || width>height*3 || gap<height*.28) continue;
             if (runs.back().y-runs[k+1].x<height*1.2) continue;
             cv::Rect candidate(run.x,0,width,patch.rows);
             std::vector<cv::Point> pixels; cv::findNonZero(ink(candidate),pixels);
             if (pixels.empty()) continue;
             auto bounds=cv::boundingRect(pixels);
             if (bounds.height<height*.65 || bounds.width<double(bounds.height)*.4) continue;
-            cv::Rect rest(runs[k+1].x,0,patch.cols-runs[k+1].x,patch.rows);
+            if (std::abs(area.y+bounds.y+bounds.height*.5-text.y-text.height*.5)>height*.85) continue;
             auto iconColor=dominantColor(patch(candidate),ink(candidate));
+            // Neutral characters (4, ON, kana) can have different antialiasing
+            // from their neighbours; this alone is not evidence of an icon.
+            if (std::max({iconColor[0],iconColor[1],iconColor[2]})-
+                std::min({iconColor[0],iconColor[1],iconColor[2]})<40) continue;
+            cv::Rect rest=text & area;
+            rest.x-=area.x; rest.y-=area.y;
             auto textColor=dominantColor(patch(rest),ink(rest));
             if (colorDistance(iconColor,textColor)<32) continue;
             cv::Rect actual(area.x+run.x+bounds.x,area.y+bounds.y,bounds.width,bounds.height);
@@ -87,11 +137,13 @@ void protectLeadingIcons(const cv::Mat& bgr, const float* polygons, int count, c
             for (int other=0; other<count; ++other) {
                 if (other==i) continue;
                 auto evidence=cv::boundingRect(quad(polygons+other*8));
-                if (double((actual & evidence).area())/actual.area()<.6) continue;
+                double overlap=double((actual & evidence).area())/actual.area();
+                if (evidence.width>evidence.height*1.8 && overlap>.25) { independentText=true; break; }
+                if (overlap<.6) continue;
                 // Respect full-height detections of numbered bullets and
                 // neighbouring labels. False icon detections commonly cover
                 // only their internal strokes, not the complete icon.
-                if (evidence.height>=actual.height*.85 || evidence.width>evidence.height*1.8) {
+                if ((evidence.height>=actual.height*.85 && actual.height<height*1.25) || evidence.width>evidence.height*1.8) {
                     independentText=true; break;
                 }
             }
@@ -133,7 +185,7 @@ cv::Mat graphicsProtection(const cv::Mat& bgr, const float* polygons, int count)
     }
     // Preserve the antialiased edge and a narrow guard band around rules.
     // Otherwise mask expansion lets Telea spread the rule into removed text.
-    cv::dilate(protectedLines,protectedPixels,cv::Mat::ones(7,7,CV_8U));
+    cv::dilate(protectedLines,protectedPixels,cv::Mat::ones(3,3,CV_8U));
     cv::Mat hsv, color, labels, stats, centers;
     cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
     cv::inRange(hsv, cv::Scalar(0, 101, 111), cv::Scalar(180, 255, 255), color);
@@ -166,6 +218,13 @@ cv::Mat graphicsProtection(const cv::Mat& bgr, const float* polygons, int count)
         double hullArea=std::max(1.,cv::contourArea(hull));
         bool triangle = hue >= 18 && hue <= 40 && corners.size() == 3 && fill > .25 && area/hullArea>.8;
         if (!square && !triangle) continue;
+        // A colored hole inside a glyph (4, A, kana) has the same color as the
+        // surrounding background. It must not be mistaken for a marker.
+        cv::Rect surrounding(x-4,y-4,w+8,h+8);
+        surrounding &= cv::Rect(0,0,bgr.cols,bgr.rows);
+        cv::Mat rim(surrounding.size(),CV_8U,cv::Scalar(255));
+        rim(cv::Rect(r.tl()-surrounding.tl(),r.size())).setTo(0);
+        if (cv::countNonZero(rim) && colorDistance(dominantColor(bgr(r),component),dominantColor(bgr(surrounding),rim))<25) continue;
         for (auto& p : hull) p += cv::Point(x, y);
         cv::Mat marker = cv::Mat::zeros(bgr.size(), CV_8U);
         cv::fillConvexPoly(marker, hull, 255);
@@ -174,6 +233,55 @@ cv::Mat graphicsProtection(const cv::Mat& bgr, const float* polygons, int count)
     }
     protectLeadingIcons(bgr,polygons,count,protectedPixels);
     return protectedPixels;
+}
+
+cv::Mat textStrokes(const cv::Mat& bgr, cv::Rect bounds, const cv::Mat& region,
+    double height, int contrast) {
+    int size=std::clamp(cvRound(height*.7),3,81)|1;
+    cv::Rect context(bounds.x-size,bounds.y-size,bounds.width+2*size,bounds.height+2*size);
+    context &= cv::Rect(0,0,bgr.cols,bgr.rows);
+    cv::Mat gray,background,response;
+    cv::cvtColor(bgr(context),gray,cv::COLOR_BGR2GRAY);
+    cv::Rect local(bounds.tl()-context.tl(),bounds.size());
+    // Exact-color modes are unreliable on gradients: a repeated ink color can
+    // outnumber every individual background shade. Use intensity quantiles to
+    // decide whether the minority strokes are darker or lighter instead.
+    int histogram[256]={0},total=0;
+    for (int y=0; y<bounds.height; ++y) for (int x=0; x<bounds.width; ++x) {
+        if (!region.at<unsigned char>(y,x)) continue;
+        ++histogram[gray.at<unsigned char>(y+local.y,x+local.x)]; ++total;
+    }
+    auto quantile=[&](double fraction) {
+        int accumulated=0;
+        for (int v=0; v<256; ++v) { accumulated+=histogram[v]; if (accumulated>=total*fraction) return v; }
+        return 255;
+    };
+    int median=quantile(.5);
+    bool darkText=median-quantile(.05)>=quantile(.95)-median;
+    auto kernel=cv::getStructuringElement(cv::MORPH_ELLIPSE,cv::Size(size,size));
+    cv::morphologyEx(gray,background,darkText?cv::MORPH_CLOSE:cv::MORPH_OPEN,kernel);
+    if (darkText) cv::subtract(background,gray,response);
+    else cv::subtract(gray,background,response);
+    cv::compare(response,contrast,response,cv::CMP_GT);
+    cv::Mat inside=cv::Mat::zeros(context.size(),CV_8U);
+    region.copyTo(inside(local));
+    cv::Mat labels,stats,centers;
+    int n=cv::connectedComponentsWithStats(response,labels,stats,centers);
+    std::vector<int> selected(n,0);
+    for (int y=local.y; y<local.y+local.height; ++y) for (int x=local.x; x<local.x+local.width; ++x)
+        if (inside.at<unsigned char>(y,x)) ++selected[labels.at<int>(y,x)];
+    std::vector<bool> keep(n,false);
+    for (int i=1; i<n; ++i) {
+        // Reject a device frame or other edge continuing well outside the box.
+        int shortest=std::min(stats.at<int>(i,cv::CC_STAT_WIDTH),stats.at<int>(i,cv::CC_STAT_HEIGHT));
+        int longest=std::max(stats.at<int>(i,cv::CC_STAT_WIDTH),stats.at<int>(i,cv::CC_STAT_HEIGHT));
+        bool outsideRule=longest>shortest*8 && longest>height*3 && selected[i]<stats.at<int>(i,cv::CC_STAT_AREA)*.3;
+        keep[i]=selected[i]>0 && !outsideRule;
+    }
+    cv::Mat strokes=cv::Mat::zeros(bounds.size(),CV_8U);
+    for (int y=0; y<bounds.height; ++y) for (int x=0; x<bounds.width; ++x)
+        if (region.at<unsigned char>(y,x) && keep[labels.at<int>(y+local.y,x+local.x)]) strokes.at<unsigned char>(y,x)=255;
+    return strokes;
 }
 }
 
@@ -230,6 +338,80 @@ extern "C" int tp_boxes(const float* probability, int w, int h, int sourceW, int
     },error,cap);
 }
 
+extern "C" int tp_graphic_panels(const unsigned char* pixels,int w,int h,int stride,
+    int* output,int maximum,int* count,char* error,int cap) {
+    return guarded([&] {
+        *count=0;
+        cv::Mat gray,dark;
+        cv::cvtColor(rgba(pixels,w,h,stride),gray,cv::COLOR_RGBA2GRAY);
+        cv::compare(gray,100,dark,cv::CMP_LT);
+        cv::Mat originalDark=dark.clone();
+        int gap=std::clamp(std::min(w,h)/100,3,21)|1;
+        cv::morphologyEx(dark,dark,cv::MORPH_CLOSE,cv::Mat::ones(gap,gap,CV_8U));
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(dark,contours,cv::RETR_EXTERNAL,cv::CHAIN_APPROX_SIMPLE);
+        for (const auto& contour:contours) {
+            auto r=cv::boundingRect(contour);
+            if (r.width<96 || r.height<64 || r.width>r.height*6 || r.height>r.width*4 || r.area()>double(w)*h*.6) continue;
+            // A closed frame has a near-rectangular outer contour and a mostly
+            // non-dark interior. Filled panels and ordinary text fail this.
+            if (cv::contourArea(contour)<r.area()*.82 || cv::countNonZero(originalDark(r))>r.area()*.4) continue;
+            int band=std::max(3,std::min(r.width,r.height)/12);
+            auto occupancy=[&](cv::Rect edge) {return double(cv::countNonZero(dark(edge)))/edge.area();};
+            int sides=0;
+            for (auto edge:{cv::Rect(r.x,r.y,r.width,band),cv::Rect(r.x,r.y+r.height-band,r.width,band),
+                cv::Rect(r.x,r.y,band,r.height),cv::Rect(r.x+r.width-band,r.y,band,r.height)})
+                if (occupancy(edge)>=.18) ++sides;
+            // A callout arrow attached to one edge can widen the contour box.
+            if (sides<3) continue;
+            if (*count>=maximum) break;
+            int at=(*count)++*4;
+            output[at]=r.x;output[at+1]=r.y;output[at+2]=r.width;output[at+3]=r.height;
+        }
+    },error,cap);
+}
+
+extern "C" int tp_text_heights(const unsigned char* pixels,int w,int h,int stride,
+    const float* polygons,int count,float* output,char* error,int cap) {
+    return guarded([&] {
+        cv::Mat bgr; cv::cvtColor(rgba(pixels,w,h,stride),bgr,cv::COLOR_RGBA2BGR);
+        for (int i=0; i<count; ++i) {
+            auto q=quad(polygons+i*8); auto rect=cv::minAreaRect(q);
+            double height=std::min(rect.size.width,rect.size.height);
+            auto bounds=cv::boundingRect(q)&cv::Rect(0,0,w,h);
+            output[i]=0;
+            if (bounds.empty()) continue;
+            std::vector<cv::Point> poly;
+            for (auto p:q) poly.emplace_back(cvRound(p.x)-bounds.x,cvRound(p.y)-bounds.y);
+            cv::Mat region=cv::Mat::zeros(bounds.size(),CV_8U);
+            cv::fillConvexPoly(region,poly,255);
+            auto ink=textStrokes(bgr,bounds,region,height,13);
+            cv::Mat labels,stats,centers;
+            int n=cv::connectedComponentsWithStats(ink,labels,stats,centers);
+            double angle=(rect.angle+(rect.size.width>=rect.size.height?0:90))*CV_PI/180;
+            double nx=-std::sin(angle),ny=std::cos(angle);
+            std::vector<double> low(n,1e30),high(n,-1e30);
+            for (int y=0; y<ink.rows; ++y) for (int x=0; x<ink.cols; ++x) {
+                int label=labels.at<int>(y,x); if (!label) continue;
+                double t=nx*x+ny*y; low[label]=std::min(low[label],t); high[label]=std::max(high[label],t);
+            }
+            std::vector<std::pair<double,int>> sizes; int total=0;
+            for (int j=1; j<n; ++j) {
+                int area=stats.at<int>(j,cv::CC_STAT_AREA);
+                int longest=std::max(stats.at<int>(j,cv::CC_STAT_WIDTH),stats.at<int>(j,cv::CC_STAT_HEIGHT));
+                int shortest=std::min(stats.at<int>(j,cv::CC_STAT_WIDTH),stats.at<int>(j,cv::CC_STAT_HEIGHT));
+                if (area<3 || longest>height*3 || longest>shortest*4) continue;
+                sizes.emplace_back(high[j]-low[j]+1,area); total+=area;
+            }
+            std::sort(sizes.begin(),sizes.end()); int accumulated=0;
+            for (auto size:sizes) {
+                accumulated+=size.second;
+                if (accumulated>=total*.6) { output[i]=float(size.first); break; }
+            }
+        }
+    },error,cap);
+}
+
 extern "C" int tp_mask(const unsigned char* pixels, int w, int h, int stride,
     const float* polygons, int count, float padding, int contrast, int dilation, int protect, unsigned char* output, char* error, int cap) {
     return guarded([&] {
@@ -248,29 +430,25 @@ extern "C" int tp_mask(const unsigned char* pixels, int w, int h, int stride,
             for (auto& p : poly) p -= bounds.tl();
             cv::Mat region = cv::Mat::zeros(bounds.size(),CV_8U);
             cv::fillConvexPoly(region,poly,255);
-            cv::Mat patch = bgr(bounds);
-            std::unordered_map<unsigned,int> histogram;
-            int total=0, bestCount=0; unsigned best=0;
-            for (int yy=0; yy<patch.rows; ++yy) for (int xx=0; xx<patch.cols; ++xx) {
-                if (!region.at<unsigned char>(yy,xx)) continue;
-                auto p=patch.at<cv::Vec3b>(yy,xx);
-                unsigned key=(unsigned(p[0])<<16)|(unsigned(p[1])<<8)|p[2];
-                int c=++histogram[key]; ++total;
-                if (c>bestCount || (c==bestCount && key<best)) {best=key;bestCount=c;}
+            // Direct foreground separation retains thin and connected strokes
+            // on flat backgrounds. Use local morphology only when the box
+            // contains several background colors; never fill the whole box.
+            auto bg=dominantColor(bgr(bounds),region);
+            cv::Mat glyphs=cv::Mat::zeros(bounds.size(),CV_8U);
+            int flat=0,total=0;
+            for (int y=0; y<bounds.height; ++y) for (int x=0; x<bounds.width; ++x) {
+                if (!region.at<unsigned char>(y,x)) continue;
+                int distance=colorDistance(bgr.at<cv::Vec3b>(bounds.y+y,bounds.x+x),bg);
+                ++total; if (distance<=18) ++flat;
+                if (distance>contrast) glyphs.at<unsigned char>(y,x)=255;
             }
-            if (!total) continue;
-            int bg[3]={int((best>>16)&255),int((best>>8)&255),int(best&255)}, flat=0;
-            cv::Mat glyphs = cv::Mat::zeros(bounds.size(),CV_8U);
-            for (int yy=0; yy<patch.rows; ++yy) for (int xx=0; xx<patch.cols; ++xx) {
-                if (!region.at<unsigned char>(yy,xx)) continue;
-                auto p=patch.at<cv::Vec3b>(yy,xx);
-                int d=std::max({std::abs(int(p[0])-bg[0]),std::abs(int(p[1])-bg[1]),std::abs(int(p[2])-bg[2])});
-                if (d<=18) ++flat;
-                if (d>contrast) glyphs.at<unsigned char>(yy,xx)=255;
-            }
-            if (double(flat)/total < .5) glyphs=region;
+            if (!total || double(flat)/total<.65)
+                glyphs=textStrokes(bgr,bounds,region,std::min(rect.size.width,rect.size.height),contrast);
             mask(bounds) |= glyphs;
         }
+        // Remove protected ink before expansion, otherwise the expansion alone
+        // leaves a halo outside a preserved rule or icon.
+        mask.setTo(0,protectedPixels);
         if (dilation>0) cv::dilate(mask,mask,cv::getStructuringElement(cv::MORPH_ELLIPSE,cv::Size(3,3)),cv::Point(-1,-1),dilation);
         mask.setTo(0,protectedPixels);
     },error,cap);
@@ -303,8 +481,9 @@ extern "C" int tp_inpaint(const unsigned char* pixels,int w,int h,int stride,con
                 int matching=0;
                 for (int y=0; y<bounds.height; ++y) for (int x=0; x<bounds.width; ++x)
                     if (ring.at<unsigned char>(y,x) && colorDistance(bgr.at<cv::Vec3b>(bounds.y+y,bounds.x+x),bg)<=3) ++matching;
-                if (double(matching)/samples<.98) continue;
-                repaired(bounds).setTo(cv::Scalar(bg[0],bg[1],bg[2]),component);
+                if (double(matching)/samples>=.98) {
+                    repaired(bounds).setTo(cv::Scalar(bg[0],bg[1],bg[2]),component);
+                } else if (!fillSmoothBackground(bgr(bounds),component,ring,repaired(bounds))) continue;
                 remaining(bounds).setTo(0,component);
             }
             if (cv::countNonZero(remaining)) {

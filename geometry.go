@@ -1,9 +1,42 @@
 package textinpaint
 
 import (
+	"image"
+	"image/color"
 	"math"
 	"sort"
 )
+
+func protectRegions(mask *image.Gray, regions []Region) {
+	for _, r := range regions {
+		q := r.Polygon
+		left, right, top, bottom := q[0].X, q[0].X, q[0].Y, q[0].Y
+		for _, p := range q {
+			left = math.Min(left, p.X)
+			right = math.Max(right, p.X)
+			top = math.Min(top, p.Y)
+			bottom = math.Max(bottom, p.Y)
+		}
+		direction := 1.
+		if signedArea(q[:]) < 0 {
+			direction = -1
+		}
+		for y := max(0, int(math.Floor(top))); y <= min(mask.Rect.Dy()-1, int(math.Ceil(bottom))); y++ {
+			for x := max(0, int(math.Floor(left))); x <= min(mask.Rect.Dx()-1, int(math.Ceil(right))); x++ {
+				inside := true
+				for k := 0; k < 4; k++ {
+					if direction*cross(q[k], q[(k+1)%4], Point{float64(x), float64(y)}) < -0.01 {
+						inside = false
+						break
+					}
+				}
+				if inside {
+					mask.SetGray(x, y, color.Gray{})
+				}
+			}
+		}
+	}
+}
 
 func cross(a, b, c Point) float64 { return (b.X-a.X)*(c.Y-a.Y) - (b.Y-a.Y)*(c.X-a.X) }
 func signedArea(p []Point) float64 {

@@ -96,6 +96,9 @@ func New(config Config) (*Engine, error) {
 	if err := validMaskOptions(m); err != nil {
 		return nil, err
 	}
+	if err := validProcessingOptions(ProcessingOptions{MinTextHeight: d.MinTextHeight}); err != nil {
+		return nil, err
+	}
 	if d.LongSide < 64 || d.LongSide > 4096 || d.TileSize < 0 || (d.TileSize > 0 && d.TileSize < 64) || d.TileSize > 4096 || math.IsNaN(d.TileScale) || math.IsInf(d.TileScale, 0) || d.TileScale <= 0 || d.TileScale > 4 || !(d.PixelThreshold > 0 && d.PixelThreshold < 1) || !(d.BoxThreshold > 0 && d.BoxThreshold < 1) || !(d.UnclipRatio > 0 && d.UnclipRatio <= 5) || d.MaxCandidates < 1 || d.MaxCandidates > 10000 || d.Threads < 1 || d.Threads > 128 {
 		return nil, errors.New("textinpaint: invalid detection options; start with DefaultDetectionOptions()")
 	}
@@ -165,6 +168,15 @@ func (e *Engine) Close() error {
 
 // Detect returns deduplicated quadrilaterals in input-pixel coordinates.
 func (e *Engine) Detect(ctx context.Context, src image.Image) ([]Region, error) {
+	return e.DetectWithOptions(ctx, src, ProcessingOptions{MinTextHeight: e.detection.MinTextHeight})
+}
+
+// DetectWithOptions overrides the small-text threshold for this call only.
+// The shared engine's configuration is not modified.
+func (e *Engine) DetectWithOptions(ctx context.Context, src image.Image, options ProcessingOptions) ([]Region, error) {
+	if err := validProcessingOptions(options); err != nil {
+		return nil, err
+	}
 	if ctx == nil {
 		return nil, errors.New("textinpaint: nil context")
 	}
@@ -222,7 +234,84 @@ func (e *Engine) Detect(ctx context.Context, src image.Image) ([]Region, error) 
 			}
 		}
 	}
-	return deduplicate(regions), nil
+	filtered, err := filterSmallText(im, deduplicate(regions), options.MinTextHeight, e.mask.PreserveGraphics)
+	if err != nil {
+		return nil, err
+	}
+	return filtered, ctx.Err()
+}
+
+func filterSmallText(im *image.RGBA, regions []Region, minimum float64, preserveGraphics ...bool) ([]Region, error) {
+	polygons, err := flatRegions(regions, im.Rect.Dx(), im.Rect.Dy())
+	if err != nil {
+		return nil, err
+	}
+	heights, err := cv.TextHeights(im, polygons)
+	if err != nil {
+		return nil, err
+	}
+	measured := make([]Region, 0, len(regions))
+	for i, r := range regions {
+		r.TextHeight = heights[i]
+		measured = append(measured, r)
+	}
+	protect := len(preserveGraphics) == 0 || preserveGraphics[0]
+	kept, _, err := selectDetectedText(im, measured, minimum, protect)
+	return kept, err
+}
+
+// A framed inset dominated by tiny labels is a picture of an interface. Keeping
+// the whole inset also protects button artwork falsely detected as large text.
+func selectDetectedText(im *image.RGBA, regions []Region, minimum float64, preserveGraphics bool) ([]Region, []Region, error) {
+	var protected []Region
+	if minimum > 0 && preserveGraphics {
+		panels, err := cv.GraphicPanels(im)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, panel := range panels {
+			q := Quad{{float64(panel.Min.X), float64(panel.Min.Y)}, {float64(panel.Max.X - 1), float64(panel.Min.Y)}, {float64(panel.Max.X - 1), float64(panel.Max.Y - 1)}, {float64(panel.Min.X), float64(panel.Max.Y - 1)}}
+			inside, small := 0., 0.
+			for _, r := range regions {
+				if intersectionArea(q, r.Polygon) < polygonArea(r.Polygon[:])*.8 {
+					continue
+				}
+				// Weight a line by its approximate character count, so a few
+				// circular callout numbers do not outweigh an entire tiny label.
+				longest := 0.
+				for k, p := range r.Polygon {
+					next := r.Polygon[(k+1)%4]
+					longest = math.Max(longest, math.Hypot(p.X-next.X, p.Y-next.Y))
+				}
+				weight := math.Max(1, longest/math.Max(1, float64(r.TextHeight)))
+				inside += weight
+				if float64(r.TextHeight) < minimum {
+					small += weight
+				}
+			}
+			if small < 2 || small < inside*.6 {
+				continue
+			}
+			pad := panel.Inset(-3).Intersect(im.Rect)
+			protected = append(protected, Region{Polygon: Quad{{float64(pad.Min.X), float64(pad.Min.Y)}, {float64(pad.Max.X - 1), float64(pad.Min.Y)}, {float64(pad.Max.X - 1), float64(pad.Max.Y - 1)}, {float64(pad.Min.X), float64(pad.Max.Y - 1)}}})
+		}
+	}
+	kept, ignored := make([]Region, 0, len(regions)), append([]Region(nil), protected...)
+	for _, r := range regions {
+		skip := float64(r.TextHeight) < minimum
+		for _, p := range protected {
+			if intersectionArea(p.Polygon, r.Polygon) > polygonArea(r.Polygon[:])*.8 {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			ignored = append(ignored, r)
+		} else {
+			kept = append(kept, r)
+		}
+	}
+	return kept, ignored, nil
 }
 
 func (e *Engine) detectPass(im *image.RGBA, crop image.Rectangle, scale float64) ([]Region, error) {
@@ -277,8 +366,25 @@ func (e *Engine) detectPass(im *image.RGBA, crop image.Rectangle, scale float64)
 // Remove performs detection, mask generation and inpainting. Returned regions
 // can be saved as JSON for review or subsequent HTML reconstruction.
 func (e *Engine) Remove(ctx context.Context, src image.Image) (*Result, error) {
+	return e.RemoveWithOptions(ctx, src, ProcessingOptions{MinTextHeight: e.detection.MinTextHeight})
+}
+
+// RemoveWithOptions applies the same filter as DetectWithOptions before masks
+// are built, keeping ignored small text out of both the result JSON and mask.
+func (e *Engine) RemoveWithOptions(ctx context.Context, src image.Image, options ProcessingOptions) (*Result, error) {
+	if err := validProcessingOptions(options); err != nil {
+		return nil, err
+	}
 	started := time.Now()
-	regions, err := e.Detect(ctx, src)
+	all, err := e.DetectWithOptions(ctx, src, ProcessingOptions{})
+	if err != nil {
+		return nil, err
+	}
+	im, err := normalized(src)
+	if err != nil {
+		return nil, err
+	}
+	regions, ignored, err := selectDetectedText(im, all, options.MinTextHeight, e.mask.PreserveGraphics)
 	if err != nil {
 		return nil, err
 	}
@@ -290,6 +396,9 @@ func (e *Engine) Remove(ctx context.Context, src image.Image) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A neighbouring large text mask may expand into a small-text box. Reserve
+	// ignored regions after expansion as well, keeping their original pixels.
+	protectRegions(mask, ignored)
 	masked := time.Now()
 	if err = ctx.Err(); err != nil {
 		return nil, err

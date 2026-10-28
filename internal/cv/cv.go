@@ -61,6 +61,32 @@ func Mask(im *image.RGBA, polygons []float32, padding float64, contrast, dilatio
 	e := C.tp_mask(bytes(im.Pix), C.int(im.Rect.Dx()), C.int(im.Rect.Dy()), C.int(im.Stride), floats(polygons), C.int(len(polygons)/8), C.float(padding), C.int(contrast), C.int(dilation), p, bytes(out.Pix), &msg[0], 2048)
 	return out, errResult(e, &msg)
 }
+func TextHeights(im *image.RGBA, polygons []float32) ([]float32, error) {
+	out := make([]float32, len(polygons)/8)
+	if len(out) == 0 {
+		return out, nil
+	}
+	var msg [2048]C.char
+	e := C.tp_text_heights(bytes(im.Pix), C.int(im.Rect.Dx()), C.int(im.Rect.Dy()), C.int(im.Stride), floats(polygons), C.int(len(out)), floats(out), &msg[0], 2048)
+	return out, errResult(e, &msg)
+}
+
+func GraphicPanels(im *image.RGBA) ([]image.Rectangle, error) {
+	const maximum = 256
+	raw := make([]C.int, maximum*4)
+	var count C.int
+	var msg [2048]C.char
+	e := C.tp_graphic_panels(bytes(im.Pix), C.int(im.Rect.Dx()), C.int(im.Rect.Dy()), C.int(im.Stride), &raw[0], maximum, &count, &msg[0], 2048)
+	if err := errResult(e, &msg); err != nil {
+		return nil, err
+	}
+	out := make([]image.Rectangle, 0, int(count))
+	for i := 0; i < int(count)*4; i += 4 {
+		x, y := int(raw[i]), int(raw[i+1])
+		out = append(out, image.Rect(x, y, x+int(raw[i+2]), y+int(raw[i+3])))
+	}
+	return out, nil
+}
 func Inpaint(im *image.RGBA, mask *image.Gray, radius float64) (*image.RGBA, error) {
 	out := image.NewRGBA(im.Rect)
 	var msg [2048]C.char

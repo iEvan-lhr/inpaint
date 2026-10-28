@@ -40,6 +40,19 @@
 
 每次请求只能提交一张 PNG/JPEG。不按文件扩展名判断格式。检测接口只定位文字，不识别文字内容。
 
+两个 POST 接口均支持查询参数 `min_text_height`，范围 `0..256`，单位为原图像素。默认值为 12；0 关闭过滤。高度根据原图笔画估算，检测框扩大和推理时放大不会把极小字直接当成大字。`regions` 只返回达到阈值的区域，并增加 `text_height` 字段。检测、PNG 和 ZIP 使用同一过滤规则。
+
+默认图形保护同时保留以小字为主、带深色完整边框的界面示意图；这些界面中的区域也不进入 `regions`。`min_text_height=0` 关闭这项随小字过滤启用的整体保护；`-preserve-graphics=false` 也可关闭图形保护。
+
+```powershell
+curl.exe --fail-with-body -F "image=@input.png" `
+  "http://127.0.0.1:8080/v1/remove?min_text_height=16" -o no_text.png
+curl.exe --fail-with-body -F "image=@input.png" `
+  "http://127.0.0.1:8080/v1/detect?min_text_height=16" -o regions.json
+```
+
+页面可以直接调整这个值；修改图片或阈值后会清空旧预览和 JSON，避免使用不匹配的缓存。查询参数仅对当前请求生效，不改变其他调用方的配置。服务端和 CLI 都可用 `-min-text-height 16` 更改默认值；页面发送用户选择的值并覆盖服务默认值。自行实现 HTTP `Processor` 时，可同时实现 `OptionsProcessor` 接口以支持这个参数；旧的处理器仍可处理不带该参数的请求。
+
 去字 / 检测成功响应附带 `X-Region-Count` 和 `X-Processing-Ms`。后者包括读取上传内容、解码、处理和输出编码的时间，不包含客户端下载结果的时间。`regions.json` 中的 `timings` 记录各算法阶段耗时。
 
 ### curl / PowerShell

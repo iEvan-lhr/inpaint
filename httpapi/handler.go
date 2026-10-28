@@ -15,6 +15,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -32,6 +33,13 @@ var indexHTML []byte
 type Processor interface {
 	Detect(context.Context, image.Image) ([]textinpaint.Region, error)
 	Remove(context.Context, image.Image) (*textinpaint.Result, error)
+}
+
+// OptionsProcessor optionally supports a per-request small-text threshold.
+// *textinpaint.Engine implements this without changing shared configuration.
+type OptionsProcessor interface {
+	DetectWithOptions(context.Context, image.Image, textinpaint.ProcessingOptions) ([]textinpaint.Region, error)
+	RemoveWithOptions(context.Context, image.Image, textinpaint.ProcessingOptions) (*textinpaint.Result, error)
 }
 
 // Options configure resource limits. Zero values use the documented defaults.
@@ -108,6 +116,22 @@ func (h *Handler) process(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_format", "去字接口的 format 仅支持 png 或 zip；检测接口无需 format")
 		return
 	}
+	var processing *textinpaint.ProcessingOptions
+	var configurable OptionsProcessor
+	if values, present := r.URL.Query()["min_text_height"]; present {
+		minimum, parseErr := strconv.ParseFloat(values[0], 64)
+		if len(values) != 1 || parseErr != nil || math.IsNaN(minimum) || math.IsInf(minimum, 0) || minimum < 0 || minimum > 256 {
+			writeError(w, http.StatusBadRequest, "invalid_min_text_height", "最小文字高度须为 0 到 256 的有限数字；0 表示不过滤小字")
+			return
+		}
+		var ok bool
+		configurable, ok = h.processor.(OptionsProcessor)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported_options", "当前处理器不支持按请求设置文字高度")
+			return
+		}
+		processing = &textinpaint.ProcessingOptions{MinTextHeight: minimum}
+	}
 	select {
 	case h.slots <- struct{}{}:
 		defer func() { <-h.slots }()
@@ -133,10 +157,18 @@ func (h *Handler) process(w http.ResponseWriter, r *http.Request) {
 	if detectOnly {
 		detectionStarted := time.Now()
 		var regions []textinpaint.Region
-		regions, err = h.processor.Detect(ctx, src)
+		if processing != nil {
+			regions, err = configurable.DetectWithOptions(ctx, src, *processing)
+		} else {
+			regions, err = h.processor.Detect(ctx, src)
+		}
 		result = &textinpaint.Result{Regions: regions, Width: src.Bounds().Dx(), Height: src.Bounds().Dy(), Timings: textinpaint.Timings{DetectionMS: time.Since(detectionStarted).Milliseconds()}}
 	} else {
-		result, err = h.processor.Remove(ctx, src)
+		if processing != nil {
+			result, err = configurable.RemoveWithOptions(ctx, src, *processing)
+		} else {
+			result, err = h.processor.Remove(ctx, src)
+		}
 	}
 	if err != nil {
 		h.processingError(w, err)

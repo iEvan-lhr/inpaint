@@ -1,6 +1,6 @@
 # inpaint / textinpaint
 
-独立 Go 库：自动检测图片中的文字，生成遮罩，再修复背景。对边界颜色一致的区域直接补色，其他区域使用 OpenCV Telea。整个运行过程在本地 CPU 上完成，不调用云服务，也不启动 Python 子进程。
+独立 Go 库：自动检测图片中的文字，过滤过小文字，生成笔画遮罩，再修复背景。纯色区域直接补色，平滑渐变尝试局部颜色拟合，复杂背景使用 OpenCV Telea。整个运行过程在本地 CPU 上完成，不调用云服务，也不启动 Python 子进程。
 
 定位使用 **PP-OCRv4 mobile ONNX**，Go 通过 `onnxruntime_go` 调用 ONNX Runtime。图像操作通过库内的小型 cgo/C++ 桥接层调用 OpenCV 的 `core`、`imgproc`、`photo` 三个模块。没有写死样例图的文字坐标。
 
@@ -17,6 +17,10 @@
 然后浏览器打开 **http://127.0.0.1:8080**，选择图片、点击「开始去字」。其他内网电脑访问 `http://服务电脑的内网IP:8080`。
 
 点击「获取位置 JSON」可直接在页面查看、复制或下载文字检测坐标；无需先执行去字，返回内容不含文字转录。
+
+页面新增「最小文字高度」，默认 **12 像素**：低于阈值的文字保留，不进入擦除区域或返回的 `regions`。高度在原图上根据笔画估算，不是放大后的像素数，也不是检测框高度；竖排文字使用横向字宽估算。调大阈值会保留更多小字，设为 `0` 关闭过滤。高度估算是启发式方法，不能等同于人在所有屏幕和缩放比例下的可读性。
+
+启用小字过滤和 `PreserveGraphics` 时，还会检测带深色完整边框的嵌入式界面。当内部文字主要为过小标签时，整体保留这块界面，包括按钮图案和边框；该区域内被模型误判成大字的图标也不会被擦除。此规则按边框和文字大小判断，没有图片专用坐标。普通正文占主的表格继续处理。无完整边框或背景复杂的插图仍可能误判。
 
 ```powershell
 # 健康检查
@@ -111,6 +115,16 @@ cleaned, err := textinpaint.Inpaint(img, mask, 3)
 | `DrawRegions(image, regions)` | 输出文字框预览 |
 
 所有坐标相对于输入图片左上角，输出图片从 `(0,0)` 开始。`Region.Polygon` 的四个点按边界顺序排列；手工区域必须为凸四边形。检测只定位，不识别文字内容。`Result` 可以直接序列化为 JSON，图片字段会自动跳过。
+
+`Region.TextHeight` / JSON `text_height` 是估算的原图文字高度。默认选项通过 `DefaultDetectionOptions().MinTextHeight` 设置；`DetectionOptions` 的显式零值关闭小字过滤。针对一次调用调整阈值而不改变共享模型配置：
+
+```go
+options := textinpaint.ProcessingOptions{MinTextHeight: 16}
+result, err := engine.RemoveWithOptions(ctx, img, options)
+regions, err := engine.DetectWithOptions(ctx, img, options)
+```
+
+`BuildMask` 始终使用调用方给出的区域，不自行过滤；自动流程会在遮罩扩张后保护被忽略的小字区域，避免附近大字的遮罩侵入。
 
 ## Windows 快速运行
 

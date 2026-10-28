@@ -32,6 +32,7 @@ func run() error {
 	detectOnly := flag.Bool("detect-only", false, "only output polygons and their preview")
 	preserve := flag.Bool("preserve-graphics", true, "preserve document rules and geometric markers")
 	margins := flag.Bool("detect-margins", true, "enlarge page margins to find tiny headers and page numbers")
+	minimum := flag.Float64("min-text-height", textinpaint.DefaultDetectionOptions().MinTextHeight, "minimum estimated glyph height in original pixels; 0 includes tiny text")
 	flag.Parse()
 	if *input == "" {
 		return fmt.Errorf("-input is required")
@@ -62,6 +63,7 @@ func run() error {
 	d.TileSize = *tile
 	d.BoxThreshold = float32(*score)
 	d.DetectMargins = *margins
+	d.MinTextHeight = *minimum
 	m.PreserveGraphics = *preserve
 	engine, err := textinpaint.New(textinpaint.Config{ModelPath: *model, RuntimePath: *runtime, Detection: &d, Mask: &m})
 	if err != nil {
