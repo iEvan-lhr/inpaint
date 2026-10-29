@@ -260,6 +260,43 @@ func filterSmallText(im *image.RGBA, regions []Region, minimum float64, preserve
 	return kept, err
 }
 
+// DetectionResult retains ignored polygons so a later selective removal can
+// protect small text and embedded artwork without detecting the image again.
+type DetectionResult struct {
+	Regions          []Region `json:"regions"`
+	ProtectedRegions []Region `json:"protected_regions"`
+	Width            int      `json:"width"`
+	Height           int      `json:"height"`
+}
+
+// DetectWithProtection detects once and returns both eligible and protected
+// regions. Nil options use this engine's configured small-text threshold.
+func (e *Engine) DetectWithProtection(ctx context.Context, src image.Image, options *ProcessingOptions) (*DetectionResult, error) {
+	minimum := e.detection.MinTextHeight
+	if options != nil {
+		if err := validProcessingOptions(*options); err != nil {
+			return nil, err
+		}
+		minimum = options.MinTextHeight
+	}
+	all, err := e.DetectWithOptions(ctx, src, ProcessingOptions{})
+	if err != nil {
+		return nil, err
+	}
+	im, err := normalized(src)
+	if err != nil {
+		return nil, err
+	}
+	kept, ignored, err := selectDetectedText(im, all, minimum, e.mask.PreserveGraphics)
+	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &DetectionResult{Regions: kept, ProtectedRegions: ignored, Width: im.Rect.Dx(), Height: im.Rect.Dy()}, nil
+}
+
 // A framed inset dominated by tiny labels is a picture of an interface. Keeping
 // the whole inset also protects button artwork falsely detected as large text.
 func selectDetectedText(im *image.RGBA, regions []Region, minimum float64, preserveGraphics bool) ([]Region, []Region, error) {

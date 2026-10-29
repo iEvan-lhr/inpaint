@@ -168,6 +168,24 @@ func BuildMask(src image.Image, regions []Region, options MaskOptions) (*image.G
 	return cv.Mask(im, polygons, options.Padding, options.ContrastThreshold, options.Dilation, options.PreserveGraphics)
 }
 
+// BuildMaskWithProtection reserves protected polygons after mask expansion.
+// Use it when a later OCR pass rejects detections or cannot read their contents.
+// Both sets of coordinates are validated; a protected polygon always wins.
+func BuildMaskWithProtection(src image.Image, regions, protected []Region, options MaskOptions) (*image.Gray, error) {
+	if err := validImage(src); err != nil {
+		return nil, err
+	}
+	if _, err := flatRegions(protected, src.Bounds().Dx(), src.Bounds().Dy()); err != nil {
+		return nil, err
+	}
+	mask, err := BuildMask(src, regions, options)
+	if err != nil {
+		return nil, err
+	}
+	protectRegions(mask, protected)
+	return mask, nil
+}
+
 // Inpaint removes nonzero mask pixels using local background color for uniform
 // boundaries, a robust color-plane fit for smooth boundaries, and OpenCV Telea
 // for other backgrounds.

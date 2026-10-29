@@ -107,3 +107,16 @@
 已通过实际 HTTP ZIP 接口核对：说明书的 PNG 与 CLI 输出 SHA-256 一致。页面验证了默认阈值读取、返回 `text_height`、修改阈值清空旧 JSON/PNG、处理期间锁定参数，以及保持 JSON 与 PNG 同时可查看。样例、局部对比和评估数据保存在本地 `examples/http-result/small-text/`，不提交至源码仓库。
 
 高度与界面边框判断属于启发式方法；没有清晰边框的图中图、混合字体和复杂照片仍可能误判，架构图渐变处仍有少量修复痕迹。以上检查不是任意图片的质量保证。
+
+## Go 模块接入与 HTML 重建（2026-10-29）
+
+新增 `reconstruct` 包，业务代码在同一 Go 进程里调用 Analyze → 自己的 OCR 适配器 → Reconstruct。没有给库增加云模型调用、HTTP 服务依赖或 CLI 子进程依赖。新增 DetectWithProtection 和 BuildMaskWithProtection 保留延后擦除所需的保护区域。
+
+- `go test ./...`、`go vet ./...`、`go test -race ./reconstruct` 通过。
+- 回归测试覆盖：原图/坐标快照隔离、只擦除确认文字、缺失/不可读/空白识别结果保留、错误任务 ID/区域 ID/重复 ID 校验、遮罩膨胀后保护、裁图尺寸、并发复用、HTML 注入文本转义、多页渲染与无可靠笔画回退。
+- 将源码打成不含 native/模型的标准模块 ZIP，通过本地 Go module proxy 装入模块缓存；独立 `example.com/inpaint-consumer` 使用固定伪版本，`replace=<nil>`。使用外部 native 目录编译通过，README_MODULE.md 中的业务服务代码也作为独立包编译通过。
+- `scripts/use-library.ps1` 在无空格和含空格的依赖目录均实测编译通过；仅设置当前进程环境，不向模块缓存复制原生依赖。
+- 独立业务程序连接本地 OCR 协议测试服务（回放此前人工校对的文本），对两页文档分别输出 47/39 个 HTML 文本区域，没有遗漏。两页遮罩外改动像素均为 0，原图 SHA-256 与任务记录一致。测试没有调用新的外部 OCR 模型。
+- 实际浏览器检查了页面、47/39 个文字框、JSON、背景切换，无脚本错误；模板 JS 语法检查通过。本地验证素材位于 gitignored 的 `examples/http-result/module-integration/`，不上传源码仓库。
+
+本版面向水平单行文字。竖排/明显旋转、回传多行、无法测量笔画以及与保留区域相交的候选会留在背景，JSON 说明原因。字体与复杂背景修复仍为近似；Linux/macOS 未在此次环境实测。

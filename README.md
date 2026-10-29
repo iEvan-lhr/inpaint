@@ -4,6 +4,23 @@
 
 定位使用 **PP-OCRv4 mobile ONNX**，Go 通过 `onnxruntime_go` 调用 ONNX Runtime。图像操作通过库内的小型 cgo/C++ 桥接层调用 OpenCV 的 `core`、`imgproc`、`photo` 三个模块。没有写死样例图的文字坐标。
 
+## 在另一个 Go 服务中引入并生成 HTML
+
+已提供可导入的 `reconstruct` 包：先用 Go 定位，业务服务调用自己的 OCR / 多模态模型，回传区域 ID 与文字内容，再由 Go 选择性去字和组装 HTML。整个图像处理过程在业务服务进程内完成，无需启动本仓库的 HTTP 服务或 CLI。
+
+```sh
+go get github.com/iEvan-lhr/inpaint@main
+```
+
+```go
+import (
+    textinpaint "github.com/iEvan-lhr/inpaint"
+    "github.com/iEvan-lhr/inpaint/reconstruct"
+)
+```
+
+**完整引入文档：[README_MODULE.md](README_MODULE.md)**，包含 Windows/Linux/macOS 依赖、业务服务封装、外部 OCR JSON 协议、可运行示例、多页合并和部署排错。`go get` 不包含 native 库与模型；Windows 使用新增 `scripts/use-library.ps1` 从独立目录配置依赖，无需修改模块缓存。
+
 ## 作为内网 HTTP 服务使用
 
 已包含 `textinpaint-server`，模型在启动时加载一次，其他语言的程序通过 HTTP 上传图片即可调用。
@@ -44,7 +61,7 @@ cd inpaint
 
 ## 作为库使用
 
-模块路径为 `github.com/iEvan-lhr/inpaint`，Go 包名为 `textinpaint`。准备好本地 native 依赖后，在调用项目中添加本地替换（路径换成实际目录）：
+模块路径为 `github.com/iEvan-lhr/inpaint`，Go 包名为 `textinpaint`。正常集成使用上面的 `go get`，详细配置见 [模块引入文档](README_MODULE.md)。仅在联调本地源码时添加替换（路径换成实际目录）：
 
 ```sh
 go mod edit -require=github.com/iEvan-lhr/inpaint@v0.0.0
@@ -113,6 +130,10 @@ cleaned, err := textinpaint.Inpaint(img, mask, 3)
 | `Inpaint(image, mask, radius)` | 使用任意同尺寸灰度遮罩修复 |
 | `Engine.Remove(ctx, image)` | 完成检测、遮罩、修复，返回图片和坐标 |
 | `DrawRegions(image, regions)` | 输出文字框预览 |
+| `Engine.DetectWithProtection(ctx, image, options)` | 返回候选区域与需要保留的区域，供延后擦除使用 |
+| `BuildMaskWithProtection(image, regions, protected, options)` | 遮罩膨胀后继续保留指定区域 |
+| `reconstruct.Analyze` / `Task.Reconstruct` | 对接外部 OCR 并生成 HTML、背景和 JSON |
+| `reconstruct.RenderHTML` | 合并多个重建页面为自包含 HTML |
 
 所有坐标相对于输入图片左上角，输出图片从 `(0,0)` 开始。`Region.Polygon` 的四个点按边界顺序排列；手工区域必须为凸四边形。检测只定位，不识别文字内容。`Result` 可以直接序列化为 JSON，图片字段会自动跳过。
 
@@ -194,7 +215,9 @@ textinpaint/
   cmd/textinpaint/       CLI 示例
   cmd/textinpaint-server/ HTTP 服务入口
   httpapi/              HTTP 接口与内嵌网页测试页
+  reconstruct/          可导入的图片分析、OCR 回填与 HTML 重建包
   examples/http-client/  只依赖标准库的 Go HTTP 客户端
+  examples/reconstruct/  调用外部 OCR 适配服务并生成 HTML 的示例
   scripts/              Windows 环境、依赖与构建脚本
   models/               检测模型
   native/windows-amd64/  Windows 头文件、导入库和 DLL
